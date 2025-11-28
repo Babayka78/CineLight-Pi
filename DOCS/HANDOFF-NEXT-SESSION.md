@@ -334,6 +334,14 @@ echo "✓ Бэкапы созданы в BAK/$TODAY/"
    - Настраиваемые параметры (interval, timeout)
 
 ### Низкий приоритет
+1. **Переназначение YELLOW/BLUE кнопок**
+   - Сейчас: Volume +/-
+   - Планируется: другая функция
+
+2. **API для удалённого управления** (зафиксировано в development_roadmap.md 3.9)
+   - HTTP/REST API для mobile приложений
+   - Долгосрочная цель
+   - Endpoints: play, pause, seek, get_status, get_progress
    - Безопасность: авторизация, HTTPS
    - Интеграция с playback-tracker.sh
    - Возможно использовать VLC HTTP интерфейс как основу
