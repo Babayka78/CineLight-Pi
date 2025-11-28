@@ -1,7 +1,35 @@
 #!/bin/bash
-# playback-tracker.sh
-# Библиотека для отслеживания прогресса воспроизведения видеофайлов
-# Использование: source "$HOME/vlc/playback-tracker.sh"
+# playback-tracker.sh - Библиотека отслеживания прогресса воспроизведения
+# Версия: 0.2.0
+# Changelog:
+#   0.2.0 (2025-11-28) - Добавлен VLC мониторинг (monitor_vlc_playback, finalize_playback)
+#   0.1.0 (2025-11-28) - Рефакторинг .ser → .playback, универсальное отслеживание
+#   0.0.1 (начальная) - Базовые функции (save_progress, load_progress, get_status_icon)
+#
+# Использование: source "$SCRIPT_DIR/playback-tracker.sh"
+
+# Версия библиотеки (Semantic Versioning: MAJOR.MINOR.PATCH)
+PLAYBACK_TRACKER_VERSION="0.2.0"
+PLAYBACK_TRACKER_MIN_VERSION="0.2.0"  # Минимальная совместимая версия
+
+# Функция проверки совместимости версий
+check_version_compatibility() {
+    local required_version="$1"
+    local current_version="$PLAYBACK_TRACKER_VERSION"
+    
+    # Простая проверка: major version должна совпадать
+    local req_major=$(echo "$required_version" | cut -d. -f1)
+    local cur_major=$(echo "$current_version" | cut -d. -f1)
+    
+    if [ "$req_major" != "$cur_major" ]; then
+        echo "❌ ОШИБКА: Несовместимая версия playback-tracker.sh"
+        echo "   Требуется: $required_version"
+        echo "   Текущая:   $current_version"
+        return 1
+    fi
+    
+    return 0
+}
 
 # ============================================================
 # НАСТРОЙКИ (можно изменять для тонкой настройки)
@@ -191,4 +219,61 @@ get_progress_percent() {
     # Извлекаем процент
     echo "$progress" | cut -d: -f3
     return 0
+}
+
+# ============================================================
+# МОНИТОРИНГ VLC ВОСПРОИЗВЕДЕНИЯ
+# ============================================================
+
+# Мониторинг прогресса воспроизведения VLC в фоне
+# Использование: monitor_vlc_playback "/path/to/video.avi" VLC_PID
+# Возвращает: PID процесса мониторинга
+monitor_vlc_playback() {
+    local video_file="$1"
+    local vlc_pid="$2"
+    local video_dir=$(dirname "$video_file")
+    local video_name=$(basename "$video_file")
+    
+    (
+        while true; do
+            sleep "$MONITOR_INTERVAL"  # Используем настройку из начала файла (60 сек)
+            
+            # Проверяем что VLC ещё работает
+            if ! kill -0 "$vlc_pid" 2>/dev/null; then
+                break
+            fi
+            
+            # Получаем позицию через VLC RC (timeout 1 сек)
+            local current=$(echo "get_time" | nc -w 1 localhost 4212 2>&1 | grep -oE '[0-9]+' | tail -1)
+            local total=$(echo "get_length" | nc -w 1 localhost 4212 2>&1 | grep -oE '[0-9]+' | tail -1)
+            
+            # Если получили данные - сохраняем
+            if [ -n "$current" ] && [ -n "$total" ] && [ "$total" -gt 0 ]; then
+                local percent=$((current * 100 / total))
+                save_progress "$video_dir" "$video_name" "$current" "$total" "$percent"
+            fi
+        done
+    ) &
+    
+    echo $!  # Возвращаем PID процесса мониторинга
+}
+
+# Финальное сохранение позиции при выходе
+# Использование: finalize_playback "/path/to/video.avi"
+finalize_playback() {
+    local video_file="$1"
+    local video_dir=$(dirname "$video_file")
+    local video_name=$(basename "$video_file")
+    
+    # Получаем позицию (timeout 2 сек - дольше т.к. это финальное)
+    local current=$(echo "get_time" | nc -w 2 localhost 4212 2>&1 | grep -oE '[0-9]+' | tail -1)
+    local total=$(echo "get_length" | nc -w 2 localhost 4212 2>&1 | grep -oE '[0-9]+' | tail -1)
+    
+    if [ -n "$current" ] && [ -n "$total" ] && [ "$total" -gt 0 ]; then
+        local percent=$((current * 100 / total))
+        save_progress "$video_dir" "$video_name" "$current" "$total" "$percent"
+        return 0
+    fi
+    
+    return 1
 }

@@ -17,6 +17,16 @@ if [ ! -f "$VIDEO_FILE" ]; then
     exit 1
 fi
 
+# Подключаем библиотеку отслеживания прогресса
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/playback-tracker.sh"
+
+# Проверяем совместимость версии библиотеки
+REQUIRED_TRACKER_VERSION="0.2.0"
+if ! check_version_compatibility "$REQUIRED_TRACKER_VERSION"; then
+    exit 1
+fi
+
 # ВАЖНО: Укажите ваше CEC устройство
 CEC_DEVICE="/dev/cec1"
 
@@ -330,10 +340,20 @@ done &
 
 CEC_PID=$!
 
+# Запускаем мониторинг прогресса в фоне (ПОСЛЕ CEC)
+monitor_vlc_playback "$VIDEO_FILE" $VLC_PID &
+MONITOR_PID=$!
+
 # Функция для корректного завершения
 cleanup() {
     echo ""
     echo "Завершение работы..."
+    
+    # Финальное сохранение позиции
+    finalize_playback "$VIDEO_FILE"
+    
+    # Завершаем процессы
+    kill $MONITOR_PID 2>/dev/null
     kill $CEC_PID 2>/dev/null
     kill $VLC_PID 2>/dev/null
     pkill -P $$ 2>/dev/null
