@@ -121,7 +121,7 @@ load_progress() {
         return 1
     fi
     
-    # Формат из БД: position|duration|percent|series_key
+    # Формат из БД: position|duration|percent|series_prefix|series_suffix
     # Возвращаем: position:duration:percent (для совместимости)
     echo "$playback_data" | cut -d'|' -f1-3 | tr '|' ':'
     return 0
@@ -136,11 +136,12 @@ save_progress() {
     local total="$4"
     local percent="$5"
     
-    # Извлекаем series_key из имени файла
-    local series_key=$(extract_series_key "$filename")
+    # Извлекаем series_prefix и series_suffix из имени файла
+    local series_prefix=$(extract_series_prefix "$filename")
+    local series_suffix=$(extract_series_suffix "$filename")
     
     # Сохраняем в БД
-    db_save_playback "$filename" "$seconds" "$total" "$percent" "$series_key"
+    db_save_playback "$filename" "$seconds" "$total" "$percent" "$series_prefix" "$series_suffix"
     
     # DEBUG: Сохраняем timestamp в description для тестов
     db_save_debug_info "$filename" "updated_at:$(date +%s)"

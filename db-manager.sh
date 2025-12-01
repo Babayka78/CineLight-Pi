@@ -9,6 +9,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DB_PATH="${SCRIPT_DIR}/vlc_media.db"
 
 # ============================================================================
+# ПРОВЕРКА ЗАВИСИМОСТЕЙ
+# ============================================================================
+
+# Проверка наличия sqlite3
+if ! command -v sqlite3 &> /dev/null; then
+    echo "❌ ОШИБКА: sqlite3 не найден!"
+    echo ""
+    echo "Для установки на Raspberry Pi (Debian) выполните:"
+    echo "  sudo apt-get update"
+    echo "  sudo apt-get install -y sqlite3"
+    echo ""
+    echo "Или используйте готовый скрипт:"
+    echo "  bash install-sqlite3.sh"
+    echo ""
+    return 1 2>/dev/null || exit 1
+fi
+
+# ============================================================================
 # ИНИЦИАЛИЗАЦИЯ БД
 # ============================================================================
 
@@ -21,7 +39,8 @@ CREATE TABLE IF NOT EXISTS playback (
     position INTEGER,
     duration INTEGER,
     percent INTEGER,
-    series_key TEXT DEFAULT NULL,
+    series_prefix TEXT DEFAULT NULL,
+    series_suffix TEXT DEFAULT NULL,
     description TEXT DEFAULT NULL
 );
 EOF
@@ -29,14 +48,16 @@ EOF
     # Создание таблицы настроек сериалов
     sqlite3 "$DB_PATH" <<EOF
 CREATE TABLE IF NOT EXISTS series_settings (
-    series_key TEXT PRIMARY KEY,
+    series_prefix TEXT NOT NULL,
+    series_suffix TEXT NOT NULL,
     autoplay BOOLEAN DEFAULT 0,
     skip_intro BOOLEAN DEFAULT 0,
     skip_outro BOOLEAN DEFAULT 0,
     intro_start INTEGER DEFAULT NULL,
     intro_end INTEGER DEFAULT NULL,
     outro_start INTEGER DEFAULT NULL,
-    description TEXT DEFAULT NULL
+    description TEXT DEFAULT NULL,
+    PRIMARY KEY (series_prefix, series_suffix)
 );
 EOF
 }
@@ -45,28 +66,64 @@ EOF
 # УТИЛИТЫ
 # ============================================================================
 
-# Извлечение series_key из имени файла (паттерн S## E##)
+# Извлечение series_prefix из имени файла (название сериала + сезон)
 # Параметры: $1 - filename
 # Возвращает: "ShowName.S##" или пустую строку для фильмов
-extract_series_key() {
+extract_series_prefix() {
     local filename="$1"
     
     # Проверяем паттерн S##E## или S##.E##
     if echo "$filename" | grep -qiE '[._\ ]S[0-9]{1,2}[._\ ]?E[0-9]{1,2}'; then
-        # Извлекаем show_name (всё до .S## или _S## или " S##")
-        local show_name=$(echo "$filename" | sed -E 's/([._\ ]S[0-9]{1,2}[._\ ]?E[0-9]{1,2}).*//' | sed 's/[._ ]*$//')
+        # Извлекаем всё до E## (включая S##)
+        local prefix=$(echo "$filename" | sed -E 's/([._\ ]S[0-9]{1,2})[._\ ]?E[0-9]{1,2}.*/\1/')
         
-        # Извлекаем номер сезона
-        local season=$(echo "$filename" | sed -E 's/.*[._\ ]S([0-9]{1,2})[._\ ]?E[0-9]{1,2}.*/\1/')
+        # Нормализуем номер сезона (убрать leading zeros, потом добавить обратно)
+        local show_part=$(echo "$prefix" | sed -E 's/[._\ ]S[0-9]{1,2}$//')
+        local season=$(echo "$prefix" | sed -E 's/.*[._\ ]S([0-9]{1,2})$/\1/')
         
-        # Убрать leading zeros для правильного форматирования
+        # Убрать leading zeros
         season=$(echo "$season" | sed 's/^0*//')
         [ -z "$season" ] && season=0
         
         # Форматировать с leading zero
         local season_padded=$(printf "%02d" "$season")
         
-       echo "${show_name}.S${season_padded}"
+        echo "${show_part}.S${season_padded}"
+    else
+        echo ""  # Не сериал
+    fi
+}
+
+# Извлечение series_suffix из имени файла (всё после E##, включая расширение)
+# Параметры: $1 - filename
+# Возвращает: "HDR.2160p.mkv", "720p.mp4", "mkv" или пустую строку
+extract_series_suffix() {
+    local filename="$1"
+    
+    # Проверяем паттерн S##E## или S##.E##
+    if echo "$filename" | grep -qiE '[._\ ]S[0-9]{1,2}[._\ ]?E[0-9]{1,2}'; then
+        # Извлекаем всё после E## (включая расширение)
+        local suffix=$(echo "$filename" | sed -E 's/.*[._\ ]S[0-9]{1,2}[._\ ]?E[0-9]{1,2}[._\ ]?//')
+        
+        # Убрать leading точки/подчёркивания/пробелы
+        suffix=$(echo "$suffix" | sed 's/^[._ ]*//')
+        
+        echo "$suffix"
+    else
+        echo ""  # Не сериал
+    fi
+}
+
+# Извлечение композитного series_key (для обратной совместимости)
+# Параметры: $1 - filename
+# Возвращает: "prefix||suffix" или пустую строку
+extract_series_key() {
+    local filename="$1"
+    local prefix=$(extract_series_prefix "$filename")
+    local suffix=$(extract_series_suffix "$filename")
+    
+    if [ -n "$prefix" ]; then
+        echo "${prefix}||${suffix}"
     else
         echo ""  # Не сериал
     fi
@@ -77,40 +134,50 @@ extract_series_key() {
 # ============================================================================
 
 # Сохранение прогресса воспроизведения
-# Параметры: $1 - filename, $2 - position, $3 - duration, $4 - percent, $5 - series_key (optional)
+# Параметры: $1 - filename, $2 - position, $3 - duration, $4 - percent, 
+#            $5 - series_prefix (optional), $6 - series_suffix (optional)
 db_save_playback() {
     local filename="$1"
     local position="$2"
     local duration="$3"
     local percent="$4"
-    local series_key="${5:-NULL}"
+    local series_prefix="${5:-NULL}"
+    local series_suffix="${6:-NULL}"
     
-    # Если series_key пустая строка, заменяем на NULL
-    if [ -z "$series_key" ]; then
-        series_key="NULL"
+    # Если series_prefix пустая строка, заменяем на NULL
+    if [ -z "$series_prefix" ]; then
+        series_prefix="NULL"
     else
-        series_key="'$series_key'"
+        series_prefix="'$series_prefix'"
+    fi
+    
+    # Если series_suffix пустая строка, заменяем на NULL
+    if [ -z "$series_suffix" ]; then
+        series_suffix="NULL"
+    else
+        series_suffix="'$series_suffix'"
     fi
     
     sqlite3 "$DB_PATH" <<EOF
-INSERT INTO playback (filename, position, duration, percent, series_key)
-VALUES ('$filename', $position, $duration, $percent, $series_key)
+INSERT INTO playback (filename, position, duration, percent, series_prefix, series_suffix)
+VALUES ('$filename', $position, $duration, $percent, $series_prefix, $series_suffix)
 ON CONFLICT(filename) DO UPDATE SET
     position = $position,
     duration = $duration,
     percent = $percent,
-    series_key = $series_key;
+    series_prefix = $series_prefix,
+    series_suffix = $series_suffix;
 EOF
 }
 
 # Получение данных воспроизведения
 # Параметры: $1 - filename
-# Возвращает: position|duration|percent|series_key
+# Возвращает: position|duration|percent|series_prefix|series_suffix
 db_get_playback() {
     local filename="$1"
     
     sqlite3 "$DB_PATH" <<EOF
-SELECT position, duration, percent, COALESCE(series_key, '')
+SELECT position, duration, percent, COALESCE(series_prefix, ''), COALESCE(series_suffix, '')
 FROM playback
 WHERE filename = '$filename';
 EOF
@@ -136,21 +203,22 @@ db_get_playback_percent() {
 # ============================================================================
 
 # Сохранение настроек сериала
-# Параметры: $1 - series_key, $2 - autoplay, $3 - skip_intro, $4 - skip_outro,
-#            $5 - intro_start, $6 - intro_end, $7 - outro_start
+# Параметры: $1 - series_prefix, $2 - series_suffix, $3 - autoplay, $4 - skip_intro, $5 - skip_outro,
+#            $6 - intro_start, $7 - intro_end, $8 - outro_start
 db_save_series_settings() {
-    local series_key="$1"
-    local autoplay="$2"
-    local skip_intro="$3"
-    local skip_outro="$4"
-    local intro_start="${5:-NULL}"
-    local intro_end="${6:-NULL}"
-    local outro_start="${7:-NULL}"
+    local series_prefix="$1"
+    local series_suffix="$2"
+    local autoplay="$3"
+    local skip_intro="$4"
+    local skip_outro="$5"
+    local intro_start="${6:-NULL}"
+    local intro_end="${7:-NULL}"
+    local outro_start="${8:-NULL}"
     
     sqlite3 "$DB_PATH" <<EOF
-INSERT INTO series_settings (series_key, autoplay, skip_intro, skip_outro, intro_start, intro_end, outro_start)
-VALUES ('$series_key', $autoplay, $skip_intro, $skip_outro, $intro_start, $intro_end, $outro_start)
-ON CONFLICT(series_key) DO UPDATE SET
+INSERT INTO series_settings (series_prefix, series_suffix, autoplay, skip_intro, skip_outro, intro_start, intro_end, outro_start)
+VALUES ('$series_prefix', '$series_suffix', $autoplay, $skip_intro, $skip_outro, $intro_start, $intro_end, $outro_start)
+ON CONFLICT(series_prefix, series_suffix) DO UPDATE SET
     autoplay = $autoplay,
     skip_intro = $skip_intro,
     skip_outro = $skip_outro,
@@ -161,32 +229,59 @@ EOF
 }
 
 # Получение настроек сериала
-# Параметры: $1 - series_key
+# Параметры: $1 - series_prefix, $2 - series_suffix
 # Возвращает: autoplay|skip_intro|skip_outro|intro_start|intro_end|outro_start
 db_get_series_settings() {
-    local series_key="$1"
+    local series_prefix="$1"
+    local series_suffix="$2"
     
     sqlite3 "$DB_PATH" <<EOF
 SELECT autoplay, skip_intro, skip_outro, 
        COALESCE(intro_start, ''), COALESCE(intro_end, ''), COALESCE(outro_start, '')
 FROM series_settings
-WHERE series_key = '$series_key';
+WHERE series_prefix = '$series_prefix' AND series_suffix = '$series_suffix';
 EOF
 }
 
 # Проверка существования настроек
-# Параметры: $1 - series_key
+# Параметры: $1 - series_prefix, $2 - series_suffix
 # Возвращает: 0 если есть, 1 если нет
 db_series_settings_exist() {
-    local series_key="$1"
+    local series_prefix="$1"
+    local series_suffix="$2"
     
-    local result=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM series_settings WHERE series_key = '$series_key';")
+    local result=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM series_settings WHERE series_prefix = '$series_prefix' AND series_suffix = '$series_suffix';")
     
     if [ "$result" -gt 0 ]; then
         return 0
     else
         return 1
     fi
+}
+
+# Поиск других версий сериала с тем же prefix, но другим suffix
+# Параметры: $1 - series_prefix, $2 - series_suffix (текущий, может быть пустым)
+# Возвращает: список suffix|last_filename|max_percent (по строке на версию)
+db_find_other_versions() {
+    local series_prefix="$1"
+    local current_suffix="$2"
+    
+    # Нормализуем текущий suffix для сравнения (пустая строка остаётся пустой)
+    local normalized_current="${current_suffix}"
+    
+    sqlite3 "$DB_PATH" <<EOF
+SELECT DISTINCT COALESCE(p1.series_suffix, ''),
+       (SELECT filename FROM playback p2 
+        WHERE p2.series_prefix = p1.series_prefix 
+          AND COALESCE(p2.series_suffix, '') = COALESCE(p1.series_suffix, '')
+        ORDER BY rowid DESC LIMIT 1) as last_filename,
+       (SELECT MAX(percent) FROM playback p3 
+        WHERE p3.series_prefix = p1.series_prefix 
+          AND COALESCE(p3.series_suffix, '') = COALESCE(p1.series_suffix, '')) as max_percent
+FROM playback p1
+WHERE p1.series_prefix = '$series_prefix' 
+  AND COALESCE(p1.series_suffix, '') != COALESCE('$normalized_current', '');
+EOF
 }
 
 # ============================================================================
