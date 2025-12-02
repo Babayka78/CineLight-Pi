@@ -80,9 +80,9 @@ show_menu() {
         video_filenames+=("$filename")
     done < <(find "$current_dir" -maxdepth 1 -type f \( -iname "*.avi" -o -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.wmv" -o -iname "*.flv" \) -print0 | sort -z)
     
-    # Пакетная загрузка процентов для всех файлов (ОПТИМИЗАЦИЯ: 1 SQL запрос вместо N)
+    # Пакетная загрузка статусов для всех файлов (ОПТИМИЗАЦИЯ: 1 SQL запрос вместо N)
     if [ ${#video_filenames[@]} -gt 0 ]; then
-        cache_playback_percents "$current_dir" "${video_filenames[@]}"
+        cache_playback_statuses "$current_dir" "${video_filenames[@]}"
     fi
     
     # Логируем время построения списка
@@ -90,18 +90,24 @@ show_menu() {
     local build_time=$(echo "$end_build - $start_build" | bc)
     timing_log "BUILD_LIST" "Files: ${#video_filenames[@]}, Time: ${build_time}s"
     
-    # Теперь добавляем видео файлы в items (теперь get_status_icon использует кеш)
+    # Теперь добавляем видео файлы в items (берем статус напрямую из кеша)
     for filename in "${video_filenames[@]}"; do
         local file="$current_dir/$filename"
         local filesize=$(du -h "$file" | cut -f1)
         
-        # Формируем описание с иконкой статуса и размером
-        local description="$filesize"
-        local status_icon=$(get_status_icon "$current_dir" "$filename")
-        if [ -n "$status_icon" ]; then
-            # Иконка + размер в описании
-            description="${status_icon} ${filesize}"
-        fi
+        # Получаем статус напрямую из кеша (уже загружен пакетно)
+        local status="${PLAYBACK_STATUS_CACHE[$filename]}"
+        
+        # Конвертируем статус в иконку
+        local status_icon="[ ]"
+        case "$status" in
+            "watched") status_icon="[X]" ;;
+            "partial") status_icon="[T]" ;;
+            "sleep")   status_icon="[S]" ;;
+        esac
+        
+        # Формируем описание с иконкой и размером
+        local description="${status_icon} ${filesize}"
         
         # В меню: tag = чистое имя файла (для hotkey), description = иконка + размер
         items+=("$filename" "$description")

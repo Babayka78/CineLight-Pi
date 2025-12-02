@@ -157,6 +157,24 @@ db_get_playback_percent() {
     python3 "$PYTHON_DB" get_percent "$filename"
 }
 
+# Получение статуса просмотра
+# Параметры: $1 - filename
+# Возвращает: status (watched/partial/пусто)
+db_get_playback_status() {
+    local filename="$1"
+    python3 "$PYTHON_DB" get_status "$filename"
+}
+
+# Пакетное получение статусов
+# Параметры: $1 - directory, $2+ - filenames
+# Возвращает: filename:status (по строке на файл)
+db_get_playback_batch_status() {
+    local directory="$1"
+    shift
+    local filenames=("$@")
+    python3 "$PYTHON_DB" get_batch_status "$directory" "${filenames[@]}"
+}
+
 # ============================================================================
 # SERIES SETTINGS ФУНКЦИИ
 # ============================================================================

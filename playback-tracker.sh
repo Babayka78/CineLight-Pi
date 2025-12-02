@@ -52,45 +52,45 @@ PARTIAL_THRESHOLD=1      # Минимальный процент для [T] - ч
 # Интервал мониторинга в секундах
 MONITOR_INTERVAL=60
 
-# Кеш процентов просмотра (ассоциативный массив)
-declare -A PLAYBACK_PERCENT_CACHE
+# Кеш статусов просмотра (ассоциативный массив)
+declare -A PLAYBACK_STATUS_CACHE
 
 # ============================================================================
 # ФУНКЦИИ КЕШИРОВАНИЯ (оптимизация производительности)
 # ============================================================================
 
-# Пакетная загрузка процентов для всех файлов в папке (1 SQL запрос вместо N)
-cache_playback_percents() {
+# Пакетная загрузка статусов для всех файлов в папке (1 SQL запрос вместо N)
+cache_playback_statuses() {
     local directory="$1"
     shift
     local filenames=("$@")
     
     # Очищаем кеш
-    PLAYBACK_PERCENT_CACHE=()
+    PLAYBACK_STATUS_CACHE=()
     
     if [ ${#filenames[@]} -eq 0 ]; then
         return 0
     fi
     
-    # Вызываем пакетную загрузку
-    local batch_result=$(python3 "${SCRIPT_DIR}/vlc_db.py" get_batch "$directory" "${filenames[@]}")
+    # Вызываем пакетную загрузку СТАТУСОВ
+    local batch_result=$(python3 "${SCRIPT_DIR}/vlc_db.py" get_batch_status "$directory" "${filenames[@]}")
     
     # Парсим результат и заполняем кеш
-    while IFS=':' read -r filename percent; do
-        PLAYBACK_PERCENT_CACHE["$filename"]="$percent"
+    while IFS=':' read -r filename status; do
+        PLAYBACK_STATUS_CACHE["$filename"]="$status"
     done <<< "$batch_result"
 }
 
 # Обновление кеша для одного файла (после сохранения прогресса)
 update_cache_for_file() {
     local filename="$1"
-    local percent="$2"
-    PLAYBACK_PERCENT_CACHE["$filename"]="$percent"
+    local status="$2"  # Было: percent
+    PLAYBACK_STATUS_CACHE["$filename"]="$status"
 }
 
 # Очистка кеша
-clear_playback_cache() {
-    PLAYBACK_PERCENT_CACHE=()
+clear_status_cache() {
+    PLAYBACK_STATUS_CACHE=()
 }
 
 # ============================================================================
@@ -188,8 +188,9 @@ save_progress() {
     # DEBUG: Сохраняем timestamp в description для тестов
     db_save_debug_info "$filename" "updated_at:$(date +%s)"
     
-    # Обновляем кеш
-    update_cache_for_file "$filename" "$percent"
+    # Обновляем кеш статусом (БД уже вычислила статус автоматически)
+    local new_status=$(db_get_playback_status "$filename")
+    update_cache_for_file "$filename" "$new_status"
     
     return 0
 }
@@ -203,21 +204,20 @@ get_status_icon() {
     local filename="$2"
     
     # Пробуем получить из кеша
-    local percent="${PLAYBACK_PERCENT_CACHE[$filename]}"
+    local status="${PLAYBACK_STATUS_CACHE[$filename]}"
     
     # Если нет в кеше - запрашиваем из БД
-    if [ -z "$percent" ]; then
-        percent=$(db_get_playback_percent "$filename")
+    if [ -z "$status" ]; then
+        status=$(db_get_playback_status "$filename")
     fi
     
-    # Определяем иконку по порогам
-    if [ "$percent" -ge "$WATCHED_THRESHOLD" ]; then
-        echo "[X]"
-    elif [ "$percent" -ge "$PARTIAL_THRESHOLD" ]; then
-        echo "[T]"
-    else
-        echo "[ ]"
-    fi
+    # Конвертируем в иконку
+    case "$status" in
+        "watched") echo "[X]" ;;
+        "partial") echo "[T]" ;;
+        "sleep")   echo "[S]" ;;
+        *)         echo "[ ]" ;;
+    esac
     
     return 0
 }

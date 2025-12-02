@@ -56,6 +56,7 @@ class VlcDatabase:
                     position INTEGER,
                     duration INTEGER,
                     percent INTEGER,
+                    status TEXT DEFAULT NULL,
                     series_prefix TEXT DEFAULT NULL,
                     series_suffix TEXT DEFAULT NULL,
                     description TEXT DEFAULT NULL
@@ -84,22 +85,42 @@ class VlcDatabase:
             print(f"Ошибка инициализации БД: {e}", file=sys.stderr)
             return False
     
+    @staticmethod
+    def _calculate_status(percent: int) -> Optional[str]:
+        """Вычисление статуса из процента просмотра
+        
+        Возвращает:
+            'watched' - 95-100%
+            'partial' - 1-94%
+            None - 0%
+        """
+        if percent >= 95:
+            return 'watched'
+        elif percent >= 1:
+            return 'partial'
+        else:
+            return None
+    
     def save_playback(self, filename: str, position: int, duration: int, 
                      percent: int, series_prefix: Optional[str] = None, 
                      series_suffix: Optional[str] = None) -> bool:
         """Сохранение прогресса воспроизведения (защита от SQL injection)"""
         try:
+            # Автоматически вычисляем статус из процента
+            status = self._calculate_status(percent)
+            
             self.cursor.execute("""
-                INSERT INTO playback (filename, position, duration, percent, series_prefix, series_suffix)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO playback (filename, position, duration, percent, status, series_prefix, series_suffix)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(filename) DO UPDATE SET
                     position = ?,
                     duration = ?,
                     percent = ?,
+                    status = ?,
                     series_prefix = ?,
                     series_suffix = ?
-            """, (filename, position, duration, percent, series_prefix, series_suffix,
-                  position, duration, percent, series_prefix, series_suffix))
+            """, (filename, position, duration, percent, status, series_prefix, series_suffix,
+                  position, duration, percent, status, series_prefix, series_suffix))
             
             self.conn.commit()
             return True
@@ -142,6 +163,58 @@ class VlcDatabase:
         except sqlite3.Error as e:
             print(f"Ошибка получения percent: {e}", file=sys.stderr)
             return 0
+    
+    def get_playback_status(self, filename: str) -> Optional[str]:
+        """Получение статуса просмотра
+        
+        Возвращает: status ('watched', 'partial', None)
+        """
+        try:
+            self.cursor.execute("""
+                SELECT status FROM playback WHERE filename = ?
+            """, (filename,))
+            
+            result = self.cursor.fetchone()
+            return result[0] if result else None
+        except sqlite3.Error as e:
+            print(f"Ошибка получения status: {e}", file=sys.stderr)
+            return None
+    
+    def get_playback_batch_status(self, directory: str, filenames: List[str]) -> Dict[str, str]:
+        """Пакетное получение статусов для списка файлов
+        
+        Возвращает: словарь {filename: status}
+        Оптимизация: один SQL запрос вместо N запросов
+        """
+        if not filenames:
+            return {}
+        
+        try:
+            # Создаём плейсхолдеры для IN запроса
+            placeholders = ','.join(['?'] * len(filenames))
+            
+            query = f"""
+                SELECT filename, COALESCE(status, '') as status
+                FROM playback 
+                WHERE filename IN ({placeholders})
+            """
+            
+            self.cursor.execute(query, filenames)
+            
+            # Преобразуем в словарь: filename -> status
+            result = {}
+            for filename, status in self.cursor.fetchall():
+                result[filename] = status if status else ''
+            
+            # Для файлов без записи в БД возвращаем пустую строку
+            for filename in filenames:
+                if filename not in result:
+                    result[filename] = ''
+            
+            return result
+        except sqlite3.Error as e:
+            print(f"Ошибка пакетного получения статусов: {e}", file=sys.stderr)
+            return {filename: '' for filename in filenames}
     
     def save_series_settings(self, series_prefix: str, series_suffix: str,
                             autoplay: bool, skip_intro: bool, skip_outro: bool,
@@ -347,6 +420,44 @@ def cli_get_playback_percent(args: List[str]):
         return 0
 
 
+def cli_get_playback_status(args: List[str]):
+    """CLI: Получение статуса просмотра
+    
+    Аргументы: filename
+    Вывод: status (watched/partial/пусто)
+    """
+    if len(args) < 1:
+        print("ERROR: Укажите filename", file=sys.stderr)
+        return 1
+    
+    filename = args[0]
+    
+    with VlcDatabase() as db:
+        status = db.get_playback_status(filename)
+        print(status if status else '')
+        return 0
+
+
+def cli_get_playback_batch_status(args: List[str]):
+    """CLI: Пакетное получение статусов для списка файлов
+    
+    Аргументы: directory filename1 filename2 ... filenameN
+    Вывод: filename:status (по строке на файл)
+    """
+    if len(args) < 2:
+        print("ERROR: Укажите directory и список файлов", file=sys.stderr)
+        return 1
+    
+    directory = args[0]
+    filenames = args[1:]
+    
+    with VlcDatabase() as db:
+        results = db.get_playback_batch_status(directory, filenames)
+        for filename, status in results.items():
+            print(f"{filename}:{status}")
+        return 0
+
+
 def cli_save_series_settings(args: List[str]):
     """CLI: Сохранение настроек сериала
     
@@ -465,7 +576,9 @@ def print_usage():
   save_playback <file> <pos> <dur> <%> [prefix] [suffix] - Сохранить прогресс
   get_playback <file>                     - Получить прогресс
   get_percent <file>                      - Получить процент
+  get_status <file>                       - Получить статус
   get_batch <dir> <file1> [file2] ...     - Пакетное получение процентов
+  get_batch_status <dir> <file1> [file2] ... - Пакетное получение статусов
   save_settings <prefix> <suffix> <auto> <intro> <outro> [i_start] [i_end] [o_start]
   get_settings <prefix> <suffix>          - Получить настройки
   settings_exist <prefix> <suffix>        - Проверить настройки
@@ -494,7 +607,9 @@ def main():
         'save_playback': lambda: cli_save_playback(args),
         'get_playback': lambda: cli_get_playback(args),
         'get_percent': lambda: cli_get_playback_percent(args),
+        'get_status': lambda: cli_get_playback_status(args),
         'get_batch': lambda: cli_get_playback_batch(args),
+        'get_batch_status': lambda: cli_get_playback_batch_status(args),
         'save_settings': lambda: cli_save_series_settings(args),
         'get_settings': lambda: cli_get_series_settings(args),
         'settings_exist': lambda: cli_series_settings_exist(args),
