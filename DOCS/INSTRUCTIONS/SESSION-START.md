@@ -96,6 +96,63 @@ echo "✅ Сессия готова к работе!"
 
 ---
 
+## 🖥️ Тестирование на Raspberry Pi
+
+### SSH доступ к Pi
+
+**Подключение настроено по ключам:**
+```bash
+ssh pi
+```
+
+**Переход в папку проекта:**
+```bash
+cd ~/mac_disk/Project/vlc
+```
+
+### Типичные команды тестирования
+
+**Проверка Python функций:**
+```bash
+# На Pi
+ssh pi "cd ~/mac_disk/Project/vlc && python3 vlc_db.py get_status 'filename.mkv'"
+ssh pi "cd ~/mac_disk/Project/vlc && python3 vlc_db.py get_batch_status '.' 'file1.mkv' 'file2.mkv'"
+```
+
+**Проверка Bash функций:**
+```bash
+# На Pi
+ssh pi "cd ~/mac_disk/Project/vlc && bash -c 'source playback-tracker.sh && get_status_icon \".\" \"filename.mkv\"'"
+```
+
+**Проверка БД:**
+```bash
+# На Pi
+ssh pi "cd ~/mac_disk/Project/vlc && sqlite3 vlc_media.db 'SELECT * FROM playback LIMIT 5;'"
+ssh pi "cd ~/mac_disk/Project/vlc && sqlite3 vlc_media.db 'PRAGMA table_info(playback);'"
+```
+
+**Обновление существующих записей (миграция):**
+```bash
+# На Pi - пример UPDATE для заполнения status
+ssh pi "cd ~/mac_disk/Project/vlc && sqlite3 vlc_media.db \"UPDATE playback SET status = CASE WHEN percent >= 95 THEN 'watched' WHEN percent >= 1 THEN 'partial' ELSE NULL END WHERE status IS NULL;\""
+```
+
+**Просмотр логов производительности:**
+```bash
+# На Pi
+ssh pi "cd ~/mac_disk/Project/vlc && tail -50 Log/video-menu-timing.log"
+```
+
+### Важные замечания
+
+- ⚠️ macOS имеет bash 3.2 (без ассоциативных массивов)
+- ✅ Raspberry Pi имеет bash 5.2 (с ассоциативными массивами)
+- 📌 Bash скрипты с `declare -A` нужно тестировать ТОЛЬКО на Pi
+- 📌 Python скрипты можно тестировать и на macOS, и на Pi
+
+---
+
 ## 📝 Примечания
 
 - Не создавать Summary файлы в начале дня - они устарели (использовались раньше)
