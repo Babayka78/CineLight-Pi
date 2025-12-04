@@ -27,6 +27,20 @@ if ! check_version_compatibility "$REQUIRED_TRACKER_VERSION"; then
     exit 1
 fi
 
+# Подключаем библиотеку работы с БД для skip markers
+source "$SCRIPT_DIR/db-manager.sh"
+
+# Skip Intro/Outro - переменные состояния
+SKIP_SETUP_MODE=0  # 0=выключен, 1=intro_start, 2=intro_end, 3=outro_start
+INTRO_START_TIME=0
+INTRO_END_TIME=0
+OUTRO_START_TIME=0
+
+# Загруженные skip markers из БД
+LOADED_INTRO_START=""
+LOADED_INTRO_END=""
+LOADED_OUTRO_START=""
+
 # ВАЖНО: Укажите ваше CEC устройство
 CEC_DEVICE="/dev/cec1"
 
@@ -37,9 +51,157 @@ if [ ! -e "$CEC_DEVICE" ]; then
     exit 1
 fi
 
+# ============================================================================
+# ФУНКЦИИ SKIP INTRO/OUTRO
+# ============================================================================
+
+# Загрузка skip markers из БД
+load_skip_markers() {
+    local video_file="$1"
+    local basename=$(basename "$video_file")
+    
+    # Извлекаем series_prefix и series_suffix
+    local series_prefix=$(extract_series_prefix "$basename")
+    local series_suffix=$(extract_series_suffix "$basename")
+    
+    if [ -n "$series_prefix" ]; then
+        # Получаем skip markers из БД (JSON)
+        local skip_data=$(db_get_skip_markers "$series_prefix" "$series_suffix" 2>/dev/null)
+        
+        if [ -n "$skip_data" ]; then
+            # Парсим JSON с помощью grep (простой вариант без jq)
+            LOADED_INTRO_START=$(echo "$skip_data" | grep -oP '"intro_start":\s*\K[0-9]+' || echo "")
+            LOADED_INTRO_END=$(echo "$skip_data" | grep -oP '"intro_end":\s*\K[0-9]+' || echo "")
+            LOADED_OUTRO_START=$(echo "$skip_data" | grep -oP '"outro_start":\s*\K[0-9]+' || echo "")
+            
+            if [ -n "$LOADED_INTRO_START" ] && [ -n "$LOADED_INTRO_END" ]; then
+                echo "✓ Загружены intro markers: ${LOADED_INTRO_START}s - ${LOADED_INTRO_END}s"
+            fi
+            if [ -n "$LOADED_OUTRO_START" ]; then
+                echo "✓ Загружен outro marker: ${LOADED_OUTRO_START}s"
+            fi
+        fi
+    fi
+}
+
+# Обработка RED кнопки для установки skip markers
+handle_red_button() {
+    local video_file="$1"
+    local basename=$(basename "$video_file")
+    
+    # Извлекаем series info
+    local series_prefix=$(extract_series_prefix "$basename")
+    local series_suffix=$(extract_series_suffix "$basename")
+    
+    if [ -z "$series_prefix" ]; then
+        echo "⚠️  Не сериал - skip markers недоступны"
+        return
+    fi
+    
+    # Получаем текущую позицию и длительность
+    local current_time=$(echo "get_time" | nc -w 2 localhost 4212 2>&1 | grep -oE '[0-9]+' | tail -1)
+    local total_length=$(echo "get_length" | nc -w 2 localhost 4212 2>&1 | grep -oE '[0-9]+' | tail -1)
+    
+    if [ -z "$current_time" ] || [ -z "$total_length" ]; then
+        echo "⚠️  Ошибка получения времени"
+        return
+    fi
+    
+    # Определяем фазу видео (в процентах)
+    local position_percent=$((current_time * 100 / total_length))
+    
+    case $SKIP_SETUP_MODE in
+        0)  # Установка Intro Start (только в начале, <20%)
+            if [ $position_percent -lt 20 ]; then
+                INTRO_START_TIME=$current_time
+                SKIP_SETUP_MODE=1
+                echo "📍 Intro Start: ${current_time}s"
+            else
+                echo "⚠️  Intro Start можно установить только в начале видео (<20%)"
+            fi
+            ;;
+        1)  # Установка Intro End
+            INTRO_END_TIME=$current_time
+            SKIP_SETUP_MODE=2
+            
+            # Сохраняем в БД
+            if db_set_intro_markers "$series_prefix" "$series_suffix" "$INTRO_START_TIME" "$INTRO_END_TIME"; then
+                echo "✓ Intro saved: ${INTRO_START_TIME}s - ${INTRO_END_TIME}s"
+                # Обновляем загруженные значения
+                LOADED_INTRO_START=$INTRO_START_TIME
+                LOADED_INTRO_END=$INTRO_END_TIME
+            else
+                echo "✗ Ошибка сохранения intro"
+                SKIP_SETUP_MODE=0
+            fi
+            ;;
+        2)  # Установка Outro Start (только в конце, >80%)
+            if [ $position_percent -gt 80 ]; then
+                OUTRO_START_TIME=$current_time
+                
+                # Сохраняем в БД
+                if db_set_outro_marker "$series_prefix" "$series_suffix" "$current_time"; then
+                    echo "✓ Outro Start: ${current_time}s"
+                    LOADED_OUTRO_START=$current_time
+                    SKIP_SETUP_MODE=0  # Сброс
+                else
+                    echo "✗ Ошибка сохранения outro"
+                fi
+            else
+                echo "⚠️  Outro Start можно установить только в конце видео (>80%)"
+            fi
+            ;;
+        *)
+            SKIP_SETUP_MODE=0  # Сброс при некорректном состоянии
+            ;;
+    esac
+}
+
+# Мониторинг для автопропуска intro/outro
+monitor_skip_markers() {
+    local vlc_pid="$1"
+    
+    while true; do
+        sleep 2  # Проверяем каждые 2 секунды
+        
+        # Проверяем что VLC ещё работает
+        if ! kill -0 "$vlc_pid" 2>/dev/null; then
+            break
+        fi
+        
+        # Получаем текущую позицию
+        local current=$(echo "get_time" | nc -w 1 localhost 4212 2>&1 | grep -oE '[0-9]+' | tail -1)
+        
+        if [ -z "$current" ]; then
+            continue
+        fi
+        
+        # Проверяем intro (если оба маркера установлены)
+        if [ -n "$LOADED_INTRO_START" ] && [ -n "$LOADED_INTRO_END" ]; then
+            if [ "$current" -ge "$LOADED_INTRO_START" ] && [ "$current" -lt "$LOADED_INTRO_END" ]; then
+                echo "⏩ Пропуск заставки: ${LOADED_INTRO_START}s → ${LOADED_INTRO_END}s"
+                echo "seek $LOADED_INTRO_END" | nc -w 1 localhost:4212 > /dev/null 2>&1
+                sleep 1  # Даём времени на перемотку
+            fi
+        fi
+        
+        # Проверяем outro
+        if [ -n "$LOADED_OUTRO_START" ]; then
+            if [ "$current" -ge "$LOADED_OUTRO_START" ]; then
+                echo "⏹️  Конец серии (outro: ${LOADED_OUTRO_START}s)"
+                echo "stop" | nc -w 1 localhost:4212 > /dev/null 2>&1
+                break
+            fi
+        fi
+    done
+}
+
 echo "Запуск VLC с RC интерфейсом..."
 echo "Для ручного управления: nc localhost 4212"
 echo ""
+
+# Загружаем skip markers для текущего файла
+load_skip_markers "$VIDEO_FILE"
 
 # Запускаем VLC с RC интерфейсом
 if [ -n "$START_TIME" ]; then
@@ -168,20 +330,9 @@ cec-client -d 8 -t r "$CEC_DEVICE" 2>&1 | while IFS= read -r line; do
         continue
     fi
 
-# RED → Audio track (через -1 для корректного переключения)
+# RED → Skip Intro/Outro setup
     if [[ "$line" == *"44:72"* ]]; then
-        echo "🔊 Audio track switch"
-        # Сначала отключаем, потом включаем следующий
-        echo "atrack -1" | nc -w 1 localhost 4212 >/dev/null 2>&1
-        sleep 2
-        current_atrack=$(echo "atrack" | nc -w 1 localhost 4212 2>&1 | grep -oE 'track [0-9-]+' | grep -oE '[0-9-]+' | head -1)
-        if [ "$current_atrack" = "-1" ] || [ -z "$current_atrack" ]; then
-            next_atrack=1
-        else
-            next_atrack=$((current_atrack + 1))
-        fi
-        echo "atrack $next_atrack" | nc -w 1 localhost 4212 >/dev/null 2>&1
-        echo "   → Audio: track $next_atrack"
+        handle_red_button "$VIDEO_FILE"
         continue
     fi
     
@@ -344,6 +495,10 @@ CEC_PID=$!
 monitor_vlc_playback "$VIDEO_FILE" $VLC_PID &
 MONITOR_PID=$!
 
+# Запускаем мониторинг skip markers в фоне
+monitor_skip_markers $VLC_PID &
+SKIP_MONITOR_PID=$!
+
 # Функция для корректного завершения
 cleanup() {
     echo ""
@@ -353,6 +508,7 @@ cleanup() {
     finalize_playback "$VIDEO_FILE"
     
     # Завершаем процессы
+    kill $SKIP_MONITOR_PID 2>/dev/null
     kill $MONITOR_PID 2>/dev/null
     kill $CEC_PID 2>/dev/null
     kill $VLC_PID 2>/dev/null

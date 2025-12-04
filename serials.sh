@@ -1,11 +1,12 @@
 #!/bin/bash
 
 # serials.sh - Библиотека для управления настройками сериалов
-# Версия: 0.2.0
-# Дата: 01.12.2025
+# Версия: 0.2.1
+# Дата: 04.12.2025
 # Changelog:
 #   0.1.0 - Первая версия (файловое хранение)
 #   0.2.0 - Переход на SQLite БД с композитным ключом
+#   0.2.1 - Исправлен баг: Cancel/ESC теперь не сохраняют изменения в БД
 
 # Подключаем БД библиотеку
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,6 +31,40 @@ rotate_log_if_needed() {
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] === Лог ротирован (превысил 1MB) ===" >> "$LOG_FILE"
         fi
     fi
+}
+
+# Функция для сохранения настроек в БД (вызывается только при OK)
+save_settings_to_db() {
+    local current_dir="$1"
+    local filename="$2"
+    local series_prefix="$3"
+    local series_suffix="$4"
+    local selected="$5"
+    
+    # Ротация лога
+    rotate_log_if_needed
+    
+    # Логирование
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] === Сохранение настроек ===" >> "$LOG_FILE"
+    echo "  Директория: $current_dir" >> "$LOG_FILE"
+    echo "  Файл: $filename" >> "$LOG_FILE"
+    echo "  Series prefix: $series_prefix" >> "$LOG_FILE"
+    echo "  Series suffix: $series_suffix" >> "$LOG_FILE"
+    echo "  Выбранные опции: $selected" >> "$LOG_FILE"
+    
+    # Конвертируем выбранные опции в 0/1
+    local auto=0; echo "$selected" | grep -q "autoplay" && auto=1
+    local intro=0; echo "$selected" | grep -q "skip_intro" && intro=1
+    local outro=0; echo "$selected" | grep -q "skip_outro" && outro=1
+    
+    echo "  Значения: auto=$auto intro=$intro outro=$outro" >> "$LOG_FILE"
+    
+    # Сохраняем в БД
+    db_save_series_settings "$series_prefix" "$series_suffix" $auto $intro $outro >> "$LOG_FILE" 2>&1
+    
+    local save_result=$?
+    echo "  Результат сохранения: $save_result" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
 }
 
 # Функция для отображения меню настроек сериалов
@@ -75,44 +110,29 @@ show_series_settings() {
     exec < /dev/tty
     exec > /dev/tty
     
-    # Показываем checklist
-    local selected=$(dialog --output-fd 1 \
+    # Используем временный файл для корректной обработки exit code
+    local tmpfile=$(mktemp)
+    
+    # Показываем checklist и сохраняем результат во временный файл
+    dialog --output-fd 3 \
         --title "Настройки: $series_prefix" \
         --checklist "Выберите опции (SPACE для выбора):" 12 60 3 \
         "autoplay" "Автопродолжение следующей серии" $autoplay \
         "skip_intro" "Пропуск начальной заставки" $skip_intro \
         "skip_outro" "Пропуск конечных титров" $skip_outro \
-        2>/dev/tty)
+        3>"$tmpfile" 2>/dev/tty
     
     local exit_code=$?
+    local selected=$(cat "$tmpfile")
+    rm -f "$tmpfile"
     
-    # Если пользователь нажал OK, сохраняем настройки
-    if [ $exit_code -eq 0 ]; then
-        # Ротация лога если нужно
-        rotate_log_if_needed
-        
-        # Логирование начала сохранения
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] === Сохранение настроек ===" >> "$LOG_FILE"
-        echo "  Директория: $current_dir" >> "$LOG_FILE"
-        echo "  Файл: $filename" >> "$LOG_FILE"
-        echo "  Series prefix: $series_prefix" >> "$LOG_FILE"
-        echo "  Series suffix: $series_suffix" >> "$LOG_FILE"
-        echo "  Выбранные опции: $selected" >> "$LOG_FILE"
-        
-        # Конвертируем выбранные опции в 0/1
-        local auto=0; echo "$selected" | grep -q "autoplay" && auto=1
-        local intro=0; echo "$selected" | grep -q "skip_intro" && intro=1
-        local outro=0; echo "$selected" | grep -q "skip_outro" && outro=1
-        
-        echo "  Значения: auto=$auto intro=$intro outro=$outro" >> "$LOG_FILE"
-        
-        # Сохраняем в БД (перенаправляем вывод в лог)
-        db_save_series_settings "$series_prefix" "$series_suffix" $auto $intro $outro >> "$LOG_FILE" 2>&1
-        
-        local save_result=$?
-        echo "  Результат сохранения: $save_result" >> "$LOG_FILE"
-        echo "" >> "$LOG_FILE"
+    # Если Cancel (exit_code=1) или ESC (exit_code=255) - выходим без сохранения
+    if [ $exit_code -ne 0 ]; then
+        return 0
     fi
+    
+    # Если OK (exit_code=0) - сохраняем
+    save_settings_to_db "$current_dir" "$filename" "$series_prefix" "$series_suffix" "$selected"
 }
 
 # Функция для получения компактной строки статуса для подзаголовка
