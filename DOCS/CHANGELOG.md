@@ -6,6 +6,14 @@
 
 ---
 
+## [Unreleased]
+
+### Added
+### Changed
+### Fixed
+
+---
+
 ## [0.7.0] - 2025-12-05 - Outro Pause with Skip Settings
 
 ### Fixed
