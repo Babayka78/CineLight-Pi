@@ -9,8 +9,42 @@
 ## [Unreleased]
 
 ### Added
+- **platform-utils.sh v1.0.0**: Кросс-платформенная библиотека для macOS/Linux совместимости
+  - `detect_os()` - определение ОС (macos/linux/unknown)
+  - `platform_sort_null()` - BSD/GNU совместимая сортировка с null-разделителями
+  - `platform_timestamp()` - кросс-платформенный timestamp (секунды)
+  - `platform_time_diff()` - вычисление разницы времени (с bc или bash арифметикой)
+  - Встроенные тесты: `platform_test()` и `platform_info()`
+  
+- **video-menu.sh**: Автоматическое определение и переключение на bash 5+
+  - Проверка версии bash при запуске (требуется bash 4.0+)
+  - Автоматический поиск bash 5+ в `/opt/homebrew/bin/bash`, `/usr/local/bin/bash`, `/usr/bin/bash`
+  - Автоматический перезапуск скрипта с правильным bash через `exec`
+  - Сообщение об ошибке если bash 4+ не найден
+
 ### Changed
+- **video-menu.sh**: Интеграция platform-utils.sh (11 изменений)
+  - Заменены 6x `date +%s.%N` → `platform_timestamp` (BSD date не поддерживает %N)
+  - Заменены 3x `bc` вычисления → `platform_time_diff` (fallback на bash арифметику)
+  - Заменён 1x `sort -z` → `platform_sort_null` (BSD sort не поддерживает -z)
+  - Подключена библиотека: `source "$SCRIPT_DIR/platform-utils.sh"`
+
 ### Fixed
+- **macOS совместимость**: Исправлена ошибка `declare -A: invalid option`
+  - Проблема: bash 3.2 на macOS не поддерживает ассоциативные массивы
+  - Решение: Установлен bash 5.3.9 через Homebrew + автоматическое переключение
+  - Скрипты теперь работают на macOS 13.6 и Raspberry Pi (Debian)
+
+### Technical
+- Установлен bash 5.3.9 на macOS через `brew install bash`
+- Протестировано на macOS 13.6 и Raspberry Pi (Debian)
+- Все тесты platform-utils.sh пройдены на обеих платформах
+- Синтаксис проверен: `bash -n video-menu.sh platform-utils.sh`
+- Документация: `dependency_minimization.md`, обновлён `development_roadmap.md`
+
+### Known Issues
+- ⚠️ Видеофайлы не отображаются в корне T7 на macOS (требует диагностики)
+- ⚠️ CEC устройство требуется на macOS (нужен опциональный режим)
 
 ---
 
