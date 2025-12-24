@@ -192,14 +192,15 @@ save_progress() {
     # Сохраняем в БД
     db_save_playback "$filename" "$seconds" "$total" "$percent" "$series_prefix" "$series_suffix"
     
-    # DEBUG: Сохраняем timestamp в description для тестов
-    db_save_debug_info "$filename" "updated_at:$(date +%s)"
+    # DEBUG: Отключено - вызывало SQL injection с апострофами в именах файлов
+    # db_save_debug_info "$filename" "updated_at:$(date +%s)"
     
     # Обновляем кеш статусом (БД уже вычислила статус автоматически)
     local new_status=$(db_get_playback_status "$filename")
     update_cache_for_file "$filename" "$new_status"
     
     return 0
+
 }
 
 # Возвращает иконку статуса для файла

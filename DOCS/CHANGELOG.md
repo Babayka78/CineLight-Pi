@@ -8,9 +8,19 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Критический баг: SQL injection в debug функциях (24.12.2025)**
+  - Проблема: Функции `db_save_debug_info()` и `db_get_debug_info()` были пропущены при миграции на `vlc_db.py` (04.12.2025)
+  - Симптомы: Файлы с апострофами в именах (например `Childhood's.End.s01e02.avi`) вызывали ошибки:
+    - `printf: Childhood's.End...avi: invalid number`
+    - `Parse error near line 1: near "s": syntax error`
+  - Причина: Прямая подстановка переменных в SQL без экранирования (`WHERE filename = '$filename'`)
+  - Решение: Отключен вызов `db_save_debug_info()` в `playback-tracker.sh` (строка 195-196)
+  - Поле `description` использовалось только для DEBUG целей и не влияет на функционал
+  - См. детальный анализ: `DOCS/error_analysis_plan.md`
+
 ### Added
 ### Changed
-### Fixed
 
 ---
 
