@@ -69,11 +69,11 @@ extract_series_prefix() {
     # Проверяем паттерн S##E## или S##.E##
     if echo "$filename" | grep -qiE '[._\ ]S[0-9]{1,2}[._\ ]?E[0-9]{1,2}'; then
         # Извлекаем всё до E## (включая S##)
-        local prefix=$(echo "$filename" | sed -E 's/([._\ ]S[0-9]{1,2})[._\ ]?E[0-9]{1,2}.*/\1/')
+        local prefix=$(echo "$filename" | sed -E 's/([._\ ][Ss][0-9]{1,2})[._\ ]?[Ee][0-9]{1,2}.*/\1/')
         
         # Нормализуем номер сезона (убрать leading zeros, потом добавить обратно)
-        local show_part=$(echo "$prefix" | sed -E 's/[._\ ]S[0-9]{1,2}$//')
-        local season=$(echo "$prefix" | sed -E 's/.*[._\ ]S([0-9]{1,2})$/\1/')
+        local show_part=$(echo "$prefix" | sed -E 's/[._\ ][Ss][0-9]{1,2}$//')
+        local season=$(echo "$prefix" | sed -E 's/.*[._\ ][Ss]([0-9]{1,2})$/\1/')
         
         # Убрать leading zeros
         season=$(echo "$season" | sed 's/^0*//')
@@ -97,7 +97,7 @@ extract_series_suffix() {
     # Проверяем паттерн S##E## или S##.E##
     if echo "$filename" | grep -qiE '[._\ ]S[0-9]{1,2}[._\ ]?E[0-9]{1,2}'; then
         # Извлекаем всё после E## (включая расширение)
-        local suffix=$(echo "$filename" | sed -E 's/.*[._\ ]S[0-9]{1,2}[._\ ]?E[0-9]{1,2}[._\ ]?//')
+        local suffix=$(echo "$filename" | sed -E 's/.*[._\\ ][Ss][0-9]{1,2}[._\\ ]?[Ee][0-9]{1,2}[._\\ ]?//')
         
         # Убрать leading точки/подчёркивания/пробелы
         suffix=$(echo "$suffix" | sed 's/^[._ ]*//')

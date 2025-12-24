@@ -19,6 +19,15 @@
   - Поле `description` использовалось только для DEBUG целей и не влияет на функционал
   - См. детальный анализ: `DOCS/error_analysis_plan.md`
 
+- **Критический баг: Парсинг lowercase имён файлов сериалов (24.12.2025)**
+  - Проблема: Функции `extract_series_prefix()` и `extract_series_suffix()` не работали с lowercase паттернами `s01e03`
+  - Симптомы: Файлы типа `Childhood's.End.s01e03.avi` (lowercase) не распознавались как сериалы
+  - Ошибка: `printf: Childhood's.End.s01e03...avi: invalid number`
+  - Причина: `sed` использовал case-sensitive паттерн `[._\ ]S[0-9]...E[0-9]`, а `grep` был case-insensitive с флагом `-i`
+  - Решение: Заменены паттерны на `[Ss]` и `[Ee]` в `db-manager.sh` (строки 72, 75, 76, 100)
+  - Теперь работает с обоими вариантами: `s01e03` и `S01E03`
+
+
 ### Added
 ### Changed
 
