@@ -58,10 +58,10 @@ logs/
 *.sublime-*
 
 # Тестовые файлы (все варианты)
-test_*.sh
-*_test.sh
-*-test-*.sh
-*-test-*.md
+#test_*.sh
+#*_test.sh
+#*-test-*.sh
+#*-test-*.md
 
 # База данных SQLite
 vlc_media.db
@@ -84,3 +84,9 @@ DOCS/dev_notes/
 
 # Поиск работы
 DOCS/Job/
+
+# Перевод проекта на Python
+#Py/
+
+#Папака тестов
+#Test/

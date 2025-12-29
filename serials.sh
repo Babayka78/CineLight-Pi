@@ -263,11 +263,13 @@ show_series_settings() {
     exec < /dev/tty
     exec > /dev/tty
     
-    # ШАГ 1: Показываем checklist для булевых опций
+    # ШАГ 1: Показываем checklist для булевых опций + кнопка редактирования времени
     local tmpfile=$(mktemp)
     
     dialog --output-fd 3 \
         --title "Настройки: $series_prefix" \
+        --extra-button \
+        --extra-label "Редактировать время" \
         --checklist "Выберите опции (SPACE для выбора):" 12 60 3 \
         "autoplay" "Автопродолжение следующей серии" $autoplay \
         "skip_intro" "Пропуск начальной заставки" $skip_intro \
@@ -279,8 +281,39 @@ show_series_settings() {
     rm -f "$tmpfile"
     
     # Если Cancel (exit_code=1) или ESC (exit_code=255) - выходим без сохранения
-    if [ $exit_code -ne 0 ]; then
+    if [ $exit_code -eq 1 ] || [ $exit_code -eq 255 ]; then
         return 0
+    fi
+    
+    # Если нажата кнопка "Редактировать время" (exit_code=3)
+    if [ $exit_code -eq 3 ]; then
+        # Конвертируем секунды в MM:SS
+        local intro_start_mm=$(seconds_to_mmss "$intro_start")
+        local intro_end_mm=$(seconds_to_mmss "$intro_end")
+        local credits_mm=$(seconds_to_mmss "$credits_duration")
+        
+        
+        # Очистить экран от dialog
+        clear
+        # Вызываем внешний скрипт и сохраняем результат во временный файл
+        local tmpresult=$(mktemp)
+        ./edit-time-tput.sh "$intro_start_mm" "$intro_end_mm" "$credits_mm" > "$tmpresult"
+        local edit_exit=$?
+        local time_result=$(cat "$tmpresult")
+        rm -f "$tmpresult"
+        
+        if [ $edit_exit -ne 0 ]; then
+            # Отменено - возвращаемся к настройкам
+            show_series_settings "$current_dir"
+            return
+        fi
+        
+        # Парсим результат
+        IFS='|' read -r intro_start intro_end credits_duration <<< "$time_result"
+        
+        # Возвращаемся к настройкам
+        show_series_settings "$current_dir"
+        return
     fi
     
     # ШАГ 2: Времена НЕ затираются - используются значения загруженные из БД выше
