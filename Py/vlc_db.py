@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+vlc_db.py - Библиотека для безопасной работы с SQLite БД
+Версия: 1.2.0
+Дата: 04.12.2025
+
+Защита от SQL Injection через параметризованные запросы.
+CLI интерфейс для вызова из bash скриптов.
+"""
+
 import sqlite3
 import sys
 import os
 import json
-import threading
-import queue
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
 
@@ -14,120 +21,30 @@ from typing import Optional, Tuple, List, Dict, Any
 SCRIPT_DIR = Path(__file__).parent.resolve()
 DB_PATH = SCRIPT_DIR / "vlc_media.db"
 
-# Константы пула соединений
-MIN_CONNECTIONS = 2
-MAX_CONNECTIONS = 10
-POOL_TIMEOUT = 30  # секунд
-
-
-class ConnectionPool:
-    """Класс пула соединений с базой данных SQLite"""
-    
-    def __init__(self, db_path: Path, min_connections: int = MIN_CONNECTIONS, max_connections: int = MAX_CONNECTIONS):
-        self.db_path = db_path
-        self.min_connections = min_connections
-        self.max_connections = max_connections
-        self.pool = queue.Queue(maxsize=max_connections)
-        self.current_size = 0
-        self.lock = threading.Lock()
-        self._initialize_pool()
-    
-    def _initialize_pool(self) -> None:
-        """Инициализация пула соединений"""
-        for _ in range(self.min_connections):
-            conn = self._create_connection()
-            self.pool.put(conn)
-            self.current_size += 1
-    
-    def _create_connection(self) -> sqlite3.Connection:
-        """Создание нового соединения с базой данных"""
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        # Установка параметров для лучшей производительности
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA cache_size=1000")
-        conn.execute("PRAGMA temp_store=memory")
-        conn.execute("PRAGMA busy_timeout=30000")  # 30 секунд таймаут ожидания
-        return conn
-    
-    def get_connection(self) -> sqlite3.Connection:
-        """Получение соединения из пула"""
-        try:
-            # Попробовать получить соединение из пула
-            return self.pool.get(timeout=POOL_TIMEOUT)
-        except queue.Empty:
-            # Если пул пуст, но мы можем создать больше соединений
-            with self.lock:
-                if self.current_size < self.max_connections:
-                    conn = self._create_connection()
-                    self.current_size += 1
-                    return conn
-                else:
-                    # Если лимит соединений достигнут, ждем
-                    return self.pool.get(timeout=POOL_TIMEOUT)
-    
-    def return_connection(self, conn: sqlite3.Connection) -> None:
-        """Возврат соединения в пул"""
-        try:
-            # Проверить соединение и при необходимости восстановить
-            try:
-                conn.execute("SELECT 1")  # Проверка соединения
-            except sqlite3.Error:
-                # Если соединение разорвано, создаем новое
-                conn = self._create_connection()
-            
-            self.pool.put(conn, timeout=1)
-        except (queue.Full, sqlite3.Error):
-            # Если пул полон или соединение неисправно - закрыть соединение
-            conn.close()
-            with self.lock:
-                self.current_size -= 1
-
-
-# Глобальный пул соединений
-_connection_pool = None
-
-
-def get_connection_pool() -> 'ConnectionPool':
-        """Получение глобального пула соединений"""
-        global _connection_pool
-        if _connection_pool is None:
-            _connection_pool = ConnectionPool(DB_PATH)
-        return _connection_pool
 
 class VlcDatabase:
-    """Класс для работы с БД VLC медиаплеера с использованием пула соединений"""
+    """Класс для работы с БД VLC медиаплеера"""
     
     def __init__(self, db_path: Path = DB_PATH):
-        """Инициализация пула соединений"""
+        """Инициализация подключения к БД"""
         self.db_path = db_path
-        self.pool = get_connection_pool()
         self.conn = None
         self.cursor = None
     
-    def __enter__(self) -> 'VlcDatabase':
+    def __enter__(self):
         """Контекстный менеджер - вход"""
-        self.conn = self.pool.get_connection()
+        self.conn = sqlite3.connect(str(self.db_path))
         self.cursor = self.conn.cursor()
         return self
     
-    def __exit__(self, exc_type: Optional[type], exc_val: Optional[BaseException], exc_tb: Optional[Any]) -> None:
+    def __exit__(self, exc_type, exc_val, exc_tb):
         """Контекстный менеджер - выход"""
         if self.conn:
             if exc_type is None:
-                # Пытаемся закоммитить изменения, но с обработкой ошибок блокировки
-                try:
-                    self.conn.commit()
-                except sqlite3.OperationalError:
-                    # Если база заблокирована, откатываем транзакцию
-                    self.conn.rollback()
+                self.conn.commit()
             else:
                 self.conn.rollback()
-            # Возвращаем соединение в пул вместо закрытия
-            self.pool.return_connection(self.conn)
-            # Сбрасываем атрибуты
-            self.conn = None
-            self.cursor = None
+            self.conn.close()
     
     def init_db(self) -> bool:
         """Инициализация БД - создание таблиц если их нет"""
@@ -191,23 +108,6 @@ class VlcDatabase:
                         ALTER TABLE series_settings ADD COLUMN credits_duration INTEGER DEFAULT NULL
                     """)
             
-            # Создание индексов для оптимизации запросов
-            # Индексы для таблицы playback
-            self.cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_playback_filename 
-                ON playback(filename)
-            """)
-            self.cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_playback_series_prefix 
-                ON playback(series_prefix)
-            """)
-            
-            # Индексы для таблицы series_settings (композитный ключ уже есть, но создаём явный индекс)
-            self.cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_series_settings_prefix_suffix 
-                ON series_settings(series_prefix, series_suffix)
-            """)
-            
             self.conn.commit()
             return True
         except sqlite3.Error as e:
@@ -255,64 +155,6 @@ class VlcDatabase:
             return True
         except sqlite3.Error as e:
             print(f"Ошибка сохранения playback: {e}", file=sys.stderr)
-            return False
-    
-    def save_playback_batch(self, records: List[Dict[str, Any]]) -> bool:
-        """Пакетное сохранение прогресса воспроизведения
-        
-        Args:
-            records: список словарей с ключами:
-                - filename (str): имя файла
-                - position (int): позиция
-                - duration (int): длительность
-                - percent (int): процент
-                - series_prefix (str, optional): префикс сериала
-                - series_suffix (str, optional): суффикс сериала
-        
-        Возвращает: True при успехе, False при ошибке
-        """
-        if not records:
-            return True
-        
-        try:
-            # Подготавливаем данные для пакетной вставки
-            data = []
-            for record in records:
-                status = self._calculate_status(record['percent'])
-                data.append((
-                    record['filename'],
-                    record['position'],
-                    record['duration'],
-                    record['percent'],
-                    status,
-                    record.get('series_prefix'),
-                    record.get('series_suffix'),
-                    record['position'],
-                    record['duration'],
-                    record['percent'],
-                    status,
-                    record.get('series_prefix'),
-                    record.get('series_suffix')
-                ))
-            
-            # Выполняем пакетную вставку с использованием executemany
-            self.cursor.executemany("""
-                INSERT INTO playback (filename, position, duration, percent, status, series_prefix, series_suffix)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(filename) DO UPDATE SET
-                    position = ?,
-                    duration = ?,
-                    percent = ?,
-                    status = ?,
-                    series_prefix = ?,
-                    series_suffix = ?
-            """, data)
-            
-            self.conn.commit()
-            return True
-        except sqlite3.Error as e:
-            print(f"Ошибка пакетного сохранения playback: {e}", file=sys.stderr)
-            self.conn.rollback()
             return False
     
     def get_playback(self, filename: str) -> Optional[Tuple[int, int, int, str, str]]:
@@ -754,7 +596,7 @@ class VlcDatabase:
 # CLI ИНТЕРФЕЙС
 # ============================================================================
 
-def cli_init_db() -> int:
+def cli_init_db():
     """CLI: Инициализация БД"""
     with VlcDatabase() as db:
         success = db.init_db()
@@ -762,7 +604,7 @@ def cli_init_db() -> int:
         return 0 if success else 1
 
 
-def cli_save_playback(args: List[str]) -> int:
+def cli_save_playback(args: List[str]):
     """CLI: Сохранение прогресса воспроизведения
     
     Аргументы: filename position duration percent [series_prefix] [series_suffix]
@@ -785,7 +627,7 @@ def cli_save_playback(args: List[str]) -> int:
         return 0 if success else 1
 
 
-def cli_get_playback(args: List[str]) -> int:
+def cli_get_playback(args: List[str]):
     """CLI: Получение данных воспроизведения
     
     Аргументы: filename
@@ -806,7 +648,7 @@ def cli_get_playback(args: List[str]) -> int:
             return 1
 
 
-def cli_get_playback_percent(args: List[str]) -> int:
+def cli_get_playback_percent(args: List[str]):
     """CLI: Получение процента просмотра
     
     Аргументы: filename
@@ -824,7 +666,7 @@ def cli_get_playback_percent(args: List[str]) -> int:
         return 0
 
 
-def cli_get_playback_status(args: List[str]) -> int:
+def cli_get_playback_status(args: List[str]):
     """CLI: Получение статуса просмотра
     
     Аргументы: filename
@@ -842,7 +684,7 @@ def cli_get_playback_status(args: List[str]) -> int:
         return 0
 
 
-def cli_get_playback_batch_status(args: List[str]) -> int:
+def cli_get_playback_batch_status(args: List[str]):
     """CLI: Пакетное получение статусов для списка файлов
     
     Аргументы: directory filename1 filename2 ... filenameN
@@ -862,7 +704,7 @@ def cli_get_playback_batch_status(args: List[str]) -> int:
         return 0
 
 
-def cli_save_series_settings(args: List[str]) -> int:
+def cli_save_series_settings(args: List[str]):
     """CLI: Сохранение настроек сериала
     
     Аргументы: series_prefix series_suffix autoplay skip_intro skip_outro 
@@ -889,7 +731,7 @@ def cli_save_series_settings(args: List[str]) -> int:
         return 0 if success else 1
 
 
-def cli_get_series_settings(args: List[str]) -> int:
+def cli_get_series_settings(args: List[str]):
     """CLI: Получение настроек сериала
     
     Аргументы: series_prefix series_suffix
@@ -911,7 +753,7 @@ def cli_get_series_settings(args: List[str]) -> int:
             return 1
 
 
-def cli_series_settings_exist(args: List[str]) -> int:
+def cli_series_settings_exist(args: List[str]):
     """CLI: Проверка существования настроек
     
     Аргументы: series_prefix series_suffix
@@ -930,7 +772,7 @@ def cli_series_settings_exist(args: List[str]) -> int:
         return 0
 
 
-def cli_find_other_versions(args: List[str]) -> int:
+def cli_find_other_versions(args: List[str]):
     """CLI: Поиск других версий сериала
     
     Аргументы: series_prefix current_suffix
@@ -950,7 +792,7 @@ def cli_find_other_versions(args: List[str]) -> int:
         return 0
 
 
-def cli_get_playback_batch(args: List[str]) -> int:
+def cli_get_playback_batch(args: List[str]):
     """CLI: Пакетное получение процентов для списка файлов
     
     Аргументы: directory filename1 filename2 ... filenameN
@@ -970,7 +812,7 @@ def cli_get_playback_batch(args: List[str]) -> int:
         return 0
 
 
-def cli_get_skip_markers(args: List[str]) -> int:
+def cli_get_skip_markers(args: List[str]):
     """CLI: Получение skip markers
     
     Аргументы: series_prefix series_suffix
@@ -992,7 +834,7 @@ def cli_get_skip_markers(args: List[str]) -> int:
             return 1
 
 
-def cli_set_intro(args: List[str]) -> int:
+def cli_set_intro(args: List[str]):
     """CLI: Установка intro markers
     
     Аргументы: series_prefix series_suffix start end
@@ -1017,7 +859,7 @@ def cli_set_intro(args: List[str]) -> int:
         return 0 if success else 1
 
 
-def cli_set_outro(args: List[str]) -> int:
+def cli_set_outro(args: List[str]):
     """CLI: Установка outro marker
     
     Аргументы: series_prefix series_suffix start
@@ -1041,7 +883,7 @@ def cli_set_outro(args: List[str]) -> int:
         return 0 if success else 1
 
 
-def cli_clear_skip(args: List[str]) -> int:
+def cli_clear_skip(args: List[str]):
     """CLI: Очистка skip markers
     
     Аргументы: series_prefix series_suffix [marker_type]
@@ -1061,7 +903,7 @@ def cli_clear_skip(args: List[str]) -> int:
         return 0 if success else 1
 
 
-def cli_get_outro_triggered(args: List[str]) -> int:
+def cli_get_outro_triggered(args: List[str]):
     """Получение outro_triggered флага"""
     if len(args) < 1:
         print("ERROR: Укажите filename", file=sys.stderr)
@@ -1073,7 +915,7 @@ def cli_get_outro_triggered(args: List[str]) -> int:
         return 0
 
 
-def cli_set_outro_triggered(args: List[str]) -> int:
+def cli_set_outro_triggered(args: List[str]):
     """Установка outro_triggered флага"""
     if len(args) < 2:
         print("ERROR: Укажите filename и triggered (0/1)", file=sys.stderr)
@@ -1093,7 +935,7 @@ def cli_set_outro_triggered(args: List[str]) -> int:
         return 0 if success else 1
 
 
-def cli_get_credits_duration(args: List[str]) -> int:
+def cli_get_credits_duration(args: List[str]):
     """Получение credits_duration"""
     if len(args) < 2:
         print("ERROR: Укажите series_prefix и series_suffix", file=sys.stderr)
@@ -1108,7 +950,7 @@ def cli_get_credits_duration(args: List[str]) -> int:
             return 1
 
 
-def cli_set_credits_duration(args: List[str]) -> int:
+def cli_set_credits_duration(args: List[str]):
     """Установка credits_duration"""
     if len(args) < 3:
         print("ERROR: Укажите series_prefix series_suffix duration", file=sys.stderr)
@@ -1126,7 +968,7 @@ def cli_set_credits_duration(args: List[str]) -> int:
         return 0 if success else 1
 
 
-def print_usage() -> None:
+def print_usage():
     """Вывод справки по использованию"""
     print("""
 Использование: vlc_db.py <команда> [аргументы]
@@ -1161,7 +1003,7 @@ def print_usage() -> None:
 """)
 
 
-def main() -> int:
+def main():
     """Главная функция CLI"""
     if len(sys.argv) < 2:
         print_usage()

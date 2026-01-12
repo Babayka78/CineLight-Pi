@@ -1,0 +1,23 @@
+BAK/
+archive/
+venv/
+Log/
+Pic/
+Test/
+RELIS/
+Py/
+.git/
+__pycache__/
+*.pyc
+.DS_Store
+
+# DOCS - исключить всё кроме INSTRUCTIONS/
+DOCS/Brain/
+DOCS/dev_notes/
+DOCS/examples/
+DOCS/Job/
+DOCS/reference/
+DOCS/references/
+DOCS/task/
+DOCS/future_features/
+
